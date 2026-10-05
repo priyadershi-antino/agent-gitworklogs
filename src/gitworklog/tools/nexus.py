@@ -22,10 +22,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from dotenv import load_dotenv
+
 from gitworklog.safety import mask_secrets
 
 TOKEN_ENV = "NEXUS_ACCESS_TOKEN"
-TOKEN_ENVS = ("NEXUS_TOKEN", TOKEN_ENV)  # first one set wins; NEXUS_TOKEN is the .env name
+TOKEN_ENVS = (TOKEN_ENV, "NEXUS_TOKEN")  # explicit env var wins; NEXUS_TOKEN is the .env name
+REFRESH_TOKEN_ENV = "NEXUS_REFRESH_TOKEN"
 DEVELOPER_ENV = "NEXUS_DEVELOPER_ID"
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -96,8 +99,73 @@ def check_not_expired(token: str, now: float | None = None) -> None:
         )
 
 
+def resolve_refresh_token() -> str:
+    """Refresh token from the environment or the tool's own .env file."""
+    load_dotenv(override=False)
+    raw = os.environ.get(REFRESH_TOKEN_ENV, "").strip()
+    if not raw:
+        raise NexusAuthError(f"No refresh token. Set {REFRESH_TOKEN_ENV} in the .env file.")
+    return raw.strip("\"'")
+
+
+def refresh_access_token(
+    base_url: str | None = None,
+    *,
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    timeout: float = 30.0,
+) -> str:
+    """Call the Nexus refresh-token endpoint and return a fresh access token."""
+    load_dotenv(override=False)
+    token = clean_token(access_token or next((os.environ[k] for k in TOKEN_ENVS if os.environ.get(k, "").strip()), ""))
+    refresh = (refresh_token or os.environ.get(REFRESH_TOKEN_ENV, "")).strip().strip("\"'")
+    if not refresh:
+        raise NexusAuthError(f"No refresh token. Set {REFRESH_TOKEN_ENV} in the .env file.")
+    url = (base_url or os.environ.get("NEXUS_API_URL") or "https://rms2-be.antino.ca/api/v1").rstrip("/")
+    payload = json.dumps({"refreshToken": refresh}).encode("utf-8")
+    request = urllib.request.Request(
+        url + "/auth/refresh-token",
+        method="POST",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "User-Agent": "gitworklog/0.1",
+        },
+    )
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES)
+    except urllib.error.HTTPError as exc:
+        detail = mask_secrets(exc.read(500).decode("utf-8", errors="replace").strip())
+        if exc.code in (401, 403):
+            raise NexusAuthError("Nexus rejected the refresh token or expired access token.") from None
+        raise NexusError(f"Nexus refresh failed (HTTP {exc.code}): {detail}") from None
+    except urllib.error.URLError as exc:
+        raise NexusError(f"Could not reach Nexus during refresh: {mask_secrets(str(exc.reason))}") from None
+    except TimeoutError:
+        raise NexusError("Nexus refresh did not respond in time") from None
+    if not raw.strip():
+        raise NexusError("Nexus refresh returned an empty response")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise NexusError("Nexus refresh returned a response that is not JSON") from exc
+    new_token = data.get("accessToken") or data.get("access_token")
+    if not isinstance(new_token, str) or not new_token.strip():
+        raise NexusError("Nexus refresh did not return a new access token")
+    new_token = clean_token(new_token)
+    os.environ["NEXUS_ACCESS_TOKEN"] = new_token
+    os.environ["NEXUS_TOKEN"] = new_token
+    if isinstance(data.get("refreshToken"), str) and data["refreshToken"].strip():
+        os.environ[REFRESH_TOKEN_ENV] = data["refreshToken"].strip().strip("\"'")
+    return new_token
+
+
 def resolve_access_token(prompt: bool) -> str:
     """Token from `NEXUS_TOKEN` (e.g. in .env) or `NEXUS_ACCESS_TOKEN`, else a hidden prompt."""
+    load_dotenv(override=False)
     raw = next((os.environ[k] for k in TOKEN_ENVS if os.environ.get(k, "").strip()), "")
     if not raw.strip() and prompt:
         raw = getpass.getpass("Nexus access token (input is hidden): ")
@@ -107,7 +175,13 @@ def resolve_access_token(prompt: bool) -> str:
             "or run in a terminal to be asked for it."
         )
     token = clean_token(raw)
-    check_not_expired(token)
+    try:
+        check_not_expired(token)
+    except NexusAuthError as exc:
+        try:
+            return refresh_access_token(access_token=token)
+        except NexusAuthError:
+            raise exc
     return token
 
 

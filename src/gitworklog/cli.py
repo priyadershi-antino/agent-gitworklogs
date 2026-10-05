@@ -18,7 +18,7 @@ from rich.table import Table
 
 from gitworklog import __version__
 from gitworklog.agent import Agent, AgentEvent
-from gitworklog.config import ConfigError, Settings, load_settings
+from gitworklog.config import ConfigError, Settings, load_settings, save_repo_config_value
 from gitworklog.llm import LLMClient, LLMError
 from gitworklog.prompts import agent_system_prompt
 from gitworklog.safety import OperationDenied, ProposedOperation, mask_secrets
@@ -27,7 +27,9 @@ from gitworklog.services import health as health_service
 from gitworklog.services import pr as pr_service
 from gitworklog.services import review as review_service
 from gitworklog.services import summaries, worklog
+from gitworklog.services import timesheet as timesheet_service
 from gitworklog.tools.git import GitError, GitRunner, git_log, git_status, operation_in_progress
+from gitworklog.tools.nexus import NexusError
 from gitworklog.tools.registry import ToolContext, build_registry
 
 app = typer.Typer(
@@ -90,7 +92,7 @@ def cli_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except (GitError, ConfigError, LLMError, ValueError) as exc:
+        except (GitError, ConfigError, LLMError, NexusError, ValueError) as exc:
             console.print(f"[red]Error:[/] {mask_secrets(str(exc))}", markup=True)
             raise typer.Exit(1) from exc
 
@@ -511,6 +513,181 @@ def health(ctx: typer.Context) -> None:
         raise typer.Exit(2)
 
 
+# ----------------------------------------------------------------------------- timesheet
+
+timesheet_app = typer.Typer(
+    help="Fill the Nexus timesheet from your commits (hours are always provided by you).",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
+app.add_typer(timesheet_app, name="timesheet")
+
+
+def _timesheet_session(
+    state: AppState, need_project: bool = True
+) -> timesheet_service.TimesheetSession:
+    settings = state.settings
+    session = timesheet_service.open_session(
+        settings.timesheet_base_url,
+        settings.timesheet_project_id,
+        settings.timesheet_description_max,
+        prompt=sys.stdin.isatty(),
+    )
+    if need_project:
+        session.require_project()
+    session.llm = state.llm()
+    return session
+
+
+@timesheet_app.command("projects")
+@cli_errors
+def timesheet_projects(ctx: typer.Context) -> None:
+    """List your Nexus projects."""
+    state = _state(ctx)
+    session = _timesheet_session(state, need_project=False)
+    projects = session.client.projects(session.developer_id)
+    current = state.settings.timesheet_project_id
+    if not projects:
+        emit("No projects found for your account.")
+        return
+    for number, project in enumerate(projects, 1):
+        mark = "  <- this repository" if project.id == current else ""
+        emit(f"{number:>2}. {project.name}  [{project.id}]{mark}")
+
+
+@timesheet_app.command("init")
+@cli_errors
+def timesheet_init(
+    ctx: typer.Context,
+    project: Annotated[
+        str | None, typer.Option("--project", "-p", help="Project id or part of its name")
+    ] = None,
+) -> None:
+    """Choose the Nexus project for this repository and save it in .gitworklog/config.json."""
+    state = _state(ctx)
+    session = _timesheet_session(state, need_project=False)
+    projects = session.client.projects(session.developer_id)
+    if not projects:
+        raise NexusError("No projects found for your account.")
+    chosen = None
+    if project:
+        chosen = timesheet_service.match_project(projects, project)
+    else:
+        if not sys.stdin.isatty():
+            raise NexusError("Pass --project, or run in a terminal to pick one.")
+        for number, item in enumerate(projects, 1):
+            emit(f"{number:>2}. {item.name}  [{item.id}]")
+        try:
+            answer = input("Project number for this repository: ").strip()
+            chosen = projects[int(answer) - 1]
+        except (ValueError, IndexError, EOFError):
+            raise NexusError("Not a valid project number.") from None
+    path = save_repo_config_value(state.git.root, "timesheet_project_id", chosen.id)
+    emit(f"Saved project '{chosen.name}' ({chosen.id}) to {path}")
+
+
+@timesheet_app.command("show")
+@cli_errors
+def timesheet_show(
+    ctx: typer.Context,
+    period: PeriodArg = None,
+    date_from: FromOpt = None,
+    date_to: ToOpt = None,
+    day: Annotated[str | None, typer.Option("--date", help="One day, e.g. 2026-10-02")] = None,
+    week: Annotated[
+        str | None,
+        typer.Option("--week", help="A week: 2026-W40, or any date inside it (Mon to Sun)"),
+    ] = None,
+    month: Annotated[str | None, typer.Option("--month", help="A month, e.g. 2026-09")] = None,
+    project: Annotated[
+        str | None, typer.Option("--project", "-p", help="Project id or part of its name")
+    ] = None,
+    all_projects: Annotated[
+        bool, typer.Option("--all-projects", help="List entries of every project")
+    ] = False,
+    by: Annotated[str, typer.Option("--by", help="Add subtotals per: week or month")] = "none",
+) -> None:
+    """List timesheet entries already in Nexus (default: this week, this repository's project).
+
+    Pick the time with a period (today, yesterday, week, last-week, month, last-month),
+    --from/--to, --date, --week or --month. Pick the project with --project or --all-projects.
+    """
+    state = _state(ctx)
+    rng = timesheet_service.resolve_listing_range(
+        period, date_from, date_to, day=day, week=week, month=month
+    )
+    session = _timesheet_session(state, need_project=not (project or all_projects))
+    with console.status("Reading entries from Nexus..."):
+        groups = timesheet_service.list_entries(
+            session, rng, project=project, all_projects=all_projects
+        )
+    emit(timesheet_service.render_entries(groups, rng, by))
+
+
+@timesheet_app.command("fill")
+@cli_errors
+def timesheet_fill(
+    ctx: typer.Context,
+    period: PeriodArg = None,
+    date_from: FromOpt = None,
+    date_to: ToOpt = None,
+    hours: Annotated[
+        float | None,
+        typer.Option("--hours", help="Hours worked per day with commits (you provide this)"),
+    ] = None,
+    day: Annotated[
+        list[str] | None,
+        typer.Option("--day", help="Hours for one date, e.g. 2026-10-02=4 (repeatable)"),
+    ] = None,
+    update: Annotated[
+        bool, typer.Option("--update", help="Overwrite days that already have an entry")
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show the plan; send nothing")] = False,
+    author: AuthorOpt = None,
+    all_authors: AllAuthorsOpt = False,
+) -> None:
+    """Create timesheet entries from your commits, after you approve the plan."""
+    state = _state(ctx)
+    rng = worklog.resolve_range(period, date_from, date_to)
+    day_hours = timesheet_service.parse_day_hours(day)
+    session = _timesheet_session(state)
+    with console.status("Reading commits and existing entries..."):
+        plan = timesheet_service.collect_plan(
+            state.git,
+            session,
+            rng,
+            hours=hours,
+            day_hours=day_hours,
+            update_existing=update,
+            author=author,
+            all_authors=all_authors,
+        )
+    emit(timesheet_service.render_plan(plan))
+    if dry_run:
+        return
+    if not plan.writes:
+        emit("\nNothing to send.")
+        return
+    try:
+        results = timesheet_service.execute_plan(session, ConsoleApprover(), plan)
+    except OperationDenied:
+        emit("Cancelled. Nothing was sent to Nexus.")
+        return
+    failed = False
+    for r in results:
+        if not r.ok:
+            failed = True
+            console.print(f"[red]FAILED[/] {r.day}: {mask_secrets(r.error)}", markup=True)
+        else:
+            state_text = "verified in Nexus" if r.verified else "sent (not verified)"
+            emit(f"{r.action.upper()} {r.day}: {state_text}" + (f" ({r.error})" if r.error else ""))
+    skipped = len(plan.writes) - len(results)
+    if skipped:
+        emit(f"{skipped} later entr{'y was' if skipped == 1 else 'ies were'} not sent.")
+    if failed:
+        raise typer.Exit(1)
+
+
 # --------------------------------------------------------------------------------- agent
 
 
@@ -525,6 +702,7 @@ def _make_agent(state: AppState) -> Agent:
             today=date.today(),
             base_branch=settings.base_branch,
             commit_limits=commit_service.MessageLimits.from_settings(settings),
+            timesheet_session=lambda: _timesheet_session(state),
         )
     )
 

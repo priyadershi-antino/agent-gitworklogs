@@ -143,6 +143,52 @@ How they are enforced:
 - `--single` forces one commit. `-m "message"` also always makes one commit.
 - Splitting works on whole files. A single file with two unrelated edits stays in one commit.
 
+## Timesheet (Nexus)
+
+Fill and view the Nexus timesheet from your commits. **Hours always come from you**; Git
+cannot determine them. Only days that have commits are filled, existing entries are never
+overwritten unless you pass `--update`, and nothing is sent until you approve a plan that lists
+every request.
+
+One-time setup:
+
+```powershell
+$env:NEXUS_ACCESS_TOKEN = "<token copied from the browser>"   # lasts about 15 minutes
+gitworklog timesheet projects          # list your projects
+gitworklog timesheet init              # choose this repository's project (saved in .gitworklog/config.json)
+```
+
+If `NEXUS_ACCESS_TOKEN` is not set, a terminal run asks for the token with hidden input. The
+token is never stored, printed or sent anywhere except the Nexus API (redirects are refused).
+Your developer id is read from the token; override it with `NEXUS_DEVELOPER_ID`.
+
+Fill:
+
+```powershell
+gitworklog timesheet fill --from 2026-10-01 --to 2026-10-04 --hours 8 --dry-run   # plan only
+gitworklog timesheet fill --from 2026-10-01 --to 2026-10-04 --hours 8             # asks, then sends
+gitworklog timesheet fill week --hours 7.5 --day 2026-10-02=4                     # one day different
+gitworklog timesheet fill yesterday --hours 8 --update                            # overwrite (type 'yes')
+```
+
+List entries already in Nexus, for any project and any time:
+
+```powershell
+gitworklog timesheet show                                  # this week, this repository's project
+gitworklog timesheet show --date 2026-10-02                # one day
+gitworklog timesheet show --week 2026-W40                  # a week (or any date inside it)
+gitworklog timesheet show --month 2026-09 --by week        # a month with weekly subtotals
+gitworklog timesheet show last-month --all-projects        # every project
+gitworklog timesheet show --from 2026-09-01 --to 2026-09-30 --project "Rider"
+```
+
+Periods: `today`, `yesterday`, `week`, `last-week`, `month`, `last-month`. In chat you can ask for the
+same things ("show my entries for last month across all projects", "fill yesterday, 8 hours").
+
+Settings: `timesheet_project_id` and `timesheet_description_max` (default 500) in
+`.gitworklog/config.json`. The API URL can only be set with `NEXUS_API_URL` (HTTPS only), never
+from a repository's config.
+
 ## Usage
 
 Run from inside any repository, or pass `--repo PATH` (`-C PATH`). Global options go before the

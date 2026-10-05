@@ -28,6 +28,9 @@ class ToolContext:
     today: date = field(default_factory=date.today)
     base_branch: str = "main"
     commit_limits: Any = None  # services.commits.MessageLimits; default limits when None
+    # Returns an authenticated services.timesheet.TimesheetSession (asks for the token on first
+    # use); None when the timesheet is not available.
+    timesheet_session: Callable[[], Any] | None = None
 
 
 @dataclass
@@ -89,7 +92,7 @@ class ToolRegistry:
                 value = int(value)
             if expected and (
                 not isinstance(value, expected)
-                or (schema.get("type") == "integer" and isinstance(value, bool))
+                or (schema.get("type") in ("integer", "number") and isinstance(value, bool))
             ):
                 raise ValueError(f"Argument {key} must be of type {schema.get('type')}")
             if "enum" in schema and value not in schema["enum"]:
@@ -226,6 +229,96 @@ def _protected(
     return git.run_protected_operation(ctx.git, ctx.approver, op)
 
 
+def _timesheet_plan(
+    ctx: ToolContext,
+    date_from: str,
+    date_to: str | None,
+    hours: float | None,
+    update_existing: bool,
+):
+    from gitworklog.services import timesheet as ts
+    from gitworklog.services.worklog import resolve_range
+    from gitworklog.tools.nexus import NexusError
+
+    if ctx.timesheet_session is None:
+        raise NexusError("The timesheet is not available in this session.")
+    session = ctx.timesheet_session()
+    rng = resolve_range(date_from=date_from, date_to=date_to, today=ctx.today)
+    plan = ts.collect_plan(ctx.git, session, rng, hours=hours, update_existing=update_existing)
+    return session, plan
+
+
+def _timesheet_entries(
+    ctx: ToolContext,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    day: str | None = None,
+    week: str | None = None,
+    month: str | None = None,
+    project: str | None = None,
+    all_projects: bool = False,
+) -> dict:
+    """List entries already in Nexus. Read-only."""
+    from gitworklog.services import timesheet as ts
+    from gitworklog.tools.nexus import NexusError
+
+    if ctx.timesheet_session is None:
+        raise NexusError("The timesheet is not available in this session.")
+    rng = ts.resolve_listing_range(
+        period, date_from, date_to, day=day, week=week, month=month, today=ctx.today
+    )
+    groups = ts.list_entries(
+        ctx.timesheet_session(), rng, project=project, all_projects=all_projects
+    )
+    return {
+        "range": [rng.start.isoformat(), rng.end.isoformat()],
+        "projects": [
+            {
+                "project": g.project.name,
+                "project_id": g.project.id,
+                "total_minutes": g.total_minutes,
+                "entries": [
+                    {
+                        "date": e.date,
+                        "hours": e.hours,
+                        "minutes": e.minutes,
+                        "description": e.description,
+                    }
+                    for e in sorted(g.entries, key=lambda e: e.date)
+                ],
+            }
+            for g in groups
+        ],
+    }
+
+
+def _timesheet_preview(
+    ctx: ToolContext,
+    date_from: str,
+    date_to: str | None = None,
+    hours: float | None = None,
+    update_existing: bool = False,
+) -> dict:
+    """Plan only. Reads commits and existing entries; nothing is written."""
+    _, plan = _timesheet_plan(ctx, date_from, date_to, hours, update_existing)
+    return plan.to_dict()
+
+
+def _timesheet_submit(
+    ctx: ToolContext,
+    date_from: str,
+    hours: float,
+    date_to: str | None = None,
+    update_existing: bool = False,
+) -> dict:
+    from gitworklog.services import timesheet as ts
+
+    session, plan = _timesheet_plan(ctx, date_from, date_to, hours, update_existing)
+    results = ts.execute_plan(session, ctx.approver, plan)
+    return {"results": [r.to_dict() for r in results], "plan": plan.to_dict()}
+
+
 _STR = {"type": "string"}
 _BOOL = {"type": "boolean"}
 _INT = {"type": "integer"}
@@ -352,6 +445,55 @@ def build_registry(ctx: ToolContext) -> ToolRegistry:
                 c.git, c.approver, path, old_text, new_text
             ),
             ["path", "old_text", "new_text"],
+            True,
+        ),
+        ToolSpec(
+            "timesheet_entries",
+            "List timesheet entries already in Nexus for a time and project. Time: one of "
+            "period (today, yesterday, week, last-week, month, last-month), date_from/date_to, "
+            "day (YYYY-MM-DD), week (YYYY-Www or a date in that week), month (YYYY-MM); default "
+            "is this week. Project: the repository's project by default, `project` (id or part "
+            "of the name) or all_projects=true. Read-only.",
+            {
+                "period": _STR,
+                "date_from": _STR,
+                "date_to": _STR,
+                "day": _STR,
+                "week": _STR,
+                "month": _STR,
+                "project": _STR,
+                "all_projects": _BOOL,
+            },
+            _timesheet_entries,
+        ),
+        ToolSpec(
+            "timesheet_preview",
+            "Plan timesheet entries from commits in a date range and compare with entries "
+            "already in Nexus. Writes nothing. `hours` (per day) must be stated by the user; "
+            "if the user did not give hours, omit it (never guess).",
+            {
+                "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+                "hours": {"type": "number", "description": "hours per day, from the user"},
+                "update_existing": _BOOL,
+            },
+            _timesheet_preview,
+            ["date_from"],
+        ),
+        ToolSpec(
+            "timesheet_submit",
+            "Create timesheet entries in Nexus for days with commits. REQUIRES HUMAN APPROVAL of "
+            "the exact plan. Use only when the user asked to fill the timesheet and told you the "
+            "hours per day; never invent hours. Existing entries are only overwritten with "
+            "update_existing=true when the user asked for that.",
+            {
+                "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+                "hours": {"type": "number", "description": "hours per day, stated by the user"},
+                "update_existing": _BOOL,
+            },
+            _timesheet_submit,
+            ["date_from", "hours"],
             True,
         ),
         ToolSpec(

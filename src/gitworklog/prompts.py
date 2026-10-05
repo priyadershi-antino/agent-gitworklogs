@@ -39,6 +39,10 @@ Tools and safety:
 - When committing, make one commit per feature or logical change: if the changes contain
   unrelated work, stage and commit each group separately (git_add with that group's paths,
   then git_commit). Keep each message concise, about 15 words, never more than 80.
+- Filling the Nexus timesheet: if the user has not said how many hours per day, ASK; never
+  guess or default hours. Call timesheet_preview first, summarise the plan, then call
+  timesheet_submit only when the user asked to submit. Existing entries are never overwritten
+  unless the user explicitly asks.
 - For worklogs and timesheets call worklog_evidence; group work into logical tasks, keep each
   task tied to its commits, and state that Git cannot determine exact hours worked.
 """

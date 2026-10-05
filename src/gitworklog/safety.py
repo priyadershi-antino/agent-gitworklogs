@@ -144,6 +144,7 @@ class ProposedOperation:
     preview: str = ""
     destructive: bool = False
     pre_commands: list[list[str]] = field(default_factory=list)  # run before `command`
+    actions: list[str] = field(default_factory=list)  # non-git actions (e.g. API calls) to list
 
     @property
     def command_text(self) -> str:
@@ -151,7 +152,9 @@ class ProposedOperation:
 
     @property
     def all_commands(self) -> list[str]:
-        """Every command this approval covers, in execution order."""
+        """Every command or action this approval covers, in execution order."""
+        if self.actions:
+            return list(self.actions)
         return [*(_git_text(c) for c in self.pre_commands), self.command_text]
 
 

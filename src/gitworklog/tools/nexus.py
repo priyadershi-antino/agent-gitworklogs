@@ -25,6 +25,7 @@ from typing import Any
 from gitworklog.safety import mask_secrets
 
 TOKEN_ENV = "NEXUS_ACCESS_TOKEN"
+TOKEN_ENVS = ("NEXUS_TOKEN", TOKEN_ENV)  # first one set wins; NEXUS_TOKEN is the .env name
 DEVELOPER_ENV = "NEXUS_DEVELOPER_ID"
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -96,13 +97,14 @@ def check_not_expired(token: str, now: float | None = None) -> None:
 
 
 def resolve_access_token(prompt: bool) -> str:
-    """Token from `NEXUS_ACCESS_TOKEN`, or a hidden prompt when running in a terminal."""
-    raw = os.environ.get(TOKEN_ENV, "")
+    """Token from `NEXUS_TOKEN` (e.g. in .env) or `NEXUS_ACCESS_TOKEN`, else a hidden prompt."""
+    raw = next((os.environ[k] for k in TOKEN_ENVS if os.environ.get(k, "").strip()), "")
     if not raw.strip() and prompt:
         raw = getpass.getpass("Nexus access token (input is hidden): ")
     if not raw.strip():
         raise NexusAuthError(
-            f"No access token. Set {TOKEN_ENV}, or run in a terminal to be asked for it."
+            f"No access token. Set {TOKEN_ENVS[0]} in .env (or {TOKEN_ENV} in the environment), "
+            "or run in a terminal to be asked for it."
         )
     token = clean_token(raw)
     check_not_expired(token)

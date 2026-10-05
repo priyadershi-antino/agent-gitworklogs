@@ -425,7 +425,11 @@ def cli_repo(sample):
 
 
 def run(repo, nexus, *args, input=None, piped_approval=False, token=None):
-    env = {"NEXUS_API_URL": nexus.base_url, "NEXUS_ACCESS_TOKEN": token or nexus.token}
+    env = {
+        "NEXUS_API_URL": nexus.base_url,
+        "NEXUS_TOKEN": "",  # a real .env must not win over the test token
+        "NEXUS_ACCESS_TOKEN": token or nexus.token,
+    }
     if piped_approval:
         env["GITWORKLOG_ALLOW_PIPED_APPROVAL"] = "1"
     return runner.invoke(
@@ -477,7 +481,7 @@ def test_cli_errors_are_clean(cli_repo, nexus):
     no_token = runner.invoke(
         app,
         ["--repo", str(cli_repo.path), "--no-llm", "timesheet", "projects"],
-        env={"NEXUS_ACCESS_TOKEN": "", "NEXUS_API_URL": nexus.base_url},
+        env={"NEXUS_TOKEN": "", "NEXUS_ACCESS_TOKEN": "", "NEXUS_API_URL": nexus.base_url},
     )
     assert no_token.exit_code == 1 and "NEXUS_ACCESS_TOKEN" in no_token.output
 

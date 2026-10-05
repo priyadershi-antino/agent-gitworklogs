@@ -45,7 +45,7 @@ approval prompts through piped stdin (otherwise non-TTY sessions always deny).
   Send assistant messages back via `AssistantMessage.to_message()` (drops reasoning fields).
 - Porcelain v2 status uses `.` for "unchanged", not a space.
 - Timesheet (`services/timesheet.py`, `tools/nexus.py`): hours are USER-PROVIDED only; the Nexus
-  token comes from `NEXUS_ACCESS_TOKEN` or a hidden prompt, is never stored or logged, and goes
+  token comes from `NEXUS_TOKEN` (the tool's `.env`), `NEXUS_ACCESS_TOKEN` or a hidden prompt, is never stored or logged, and goes
   only to `NEXUS_API_URL` (no redirects). Tests use `tests/fake_nexus.py` (real local HTTP).
   The response shapes of the real API are parsed leniently (`_items`); verify against a real response.
 - Distinct Conventional Commit scopes are hard task boundaries in `services/grouping.py`.

@@ -154,11 +154,12 @@ One-time setup:
 
 ```powershell
 $env:NEXUS_ACCESS_TOKEN = "<token copied from the browser>"   # lasts about 15 minutes
+# or put NEXUS_TOKEN=<token> in gitworklog\.env (or ~\.gitworklog\.env) and it is picked up
 gitworklog timesheet projects          # list your projects
 gitworklog timesheet init              # choose this repository's project (saved in .gitworklog/config.json)
 ```
 
-If `NEXUS_ACCESS_TOKEN` is not set, a terminal run asks for the token with hidden input. The
+If neither `NEXUS_TOKEN` nor `NEXUS_ACCESS_TOKEN` is set, a terminal run asks for the token with hidden input. The
 token is never stored, printed or sent anywhere except the Nexus API (redirects are refused).
 Your developer id is read from the token; override it with `NEXUS_DEVELOPER_ID`.
 

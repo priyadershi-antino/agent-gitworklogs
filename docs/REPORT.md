@@ -5,9 +5,10 @@
 | **Project** | GitWorklog Agent, a local command-line AI assistant for Git |
 | **Version** | 0.1.0 (MVP) |
 | **Language / runtime** | Python 3.11+ (developed on 3.13.3) |
-| **Size** | about 5,300 lines of source, about 2,000 lines of tests, 219 tests |
+| **Size** | about 6,500 lines of source, about 2,900 lines of tests, 288 tests |
 | **Model** | `openai/gpt-oss-20b`, hosted by NVIDIA behind an OpenAI-compatible API |
-| **License / status** | Local project, 4 commits on `main`, not pushed to a remote |
+| **Timesheet system** | Nexus REST API (create, update and list entries), reached with `urllib` |
+| **License / status** | Local project, 6 commits on `main`, not pushed to a remote |
 
 ---
 
@@ -16,7 +17,8 @@
 GitWorklog Agent answers one question reliably: **"What did I actually work on during this time
 period?"** It reads a Git repository, groups commits into logical tasks and produces timesheet-ready
 text. It also reviews code, writes commits, summarises work, prepares standups and pull request
-descriptions, compares branches and checks repository health.
+descriptions, compares branches and checks repository health. It can also **fill and list timesheet
+entries in Nexus** from the commits it finds, using only the hours you give it.
 
 Its design rests on three principles:
 
@@ -47,6 +49,9 @@ OpenAI-compatible API, with typed tools and a safety layer.
 | 9 | PR description generator | `pr` | Optional |
 | 10 | Repository health and safety check | `health` | No |
 | 11 | Conversational agent | `chat`, `ask`, or bare `gitworklog` | Yes |
+| 12 | Fill the Nexus timesheet from commits | `timesheet fill` | No |
+| 13 | List Nexus timesheet entries (any project, date, week, month or range) | `timesheet show` | No |
+| 14 | List Nexus projects and choose the repository's project | `timesheet projects`, `timesheet init` | No |
 
 ---
 
@@ -92,6 +97,10 @@ Fixed, predictable jobs. The AI only improves wording.
 | `compare [base]` | Branch vs base | |
 | `pr [base]` | PR description | |
 | `health` | Hygiene and secrets check | exit code 2 on a problem |
+| `timesheet projects` | List the Nexus projects you can use | |
+| `timesheet init` | Choose the project for this repository and save its ID | `--project NAME_OR_ID` |
+| `timesheet show` | List entries already in Nexus | period, `--date`, `--week`, `--month`, `--from/--to`, `--project`, `--all-projects`, `--by week\|month` |
+| `timesheet fill` | Create timesheet entries from commits (approval first) | period, `--from/--to`, `--hours`, `--day DATE=HOURS`, `--update`, `--dry-run`, `--author`, `--all-authors` |
 | `version` | Version | |
 
 ### 3.4 Offline mode (no AI)
@@ -214,6 +223,72 @@ upstream divergence, large files (over 5 MB), tracked generated files (`node_mod
 git-ignored), likely secrets in tracked files (file, line and type only), debug statements
 (`console.log`, `breakpoint()`, `pdb.set_trace`), missing `.gitignore` and stashes.
 
+### 4.11 Timesheet integration (Nexus)
+
+The agent can write to and read from the Nexus timesheet system. It builds on the worklog: the
+commits and tasks are the evidence, and **the hours always come from you**.
+
+**Setup**
+1. Set the API address in the environment: `NEXUS_API_URL` (HTTPS; plain HTTP only for localhost).
+2. Provide an access token: put `NEXUS_TOKEN=...` in the tool's `.env`, or set the
+   `NEXUS_ACCESS_TOKEN` environment variable, or paste it at a hidden prompt when asked.
+3. Run `gitworklog timesheet init` once per repository. It lists your projects and saves the
+   chosen project ID in `.gitworklog/config.json` (an ID is not a secret).
+4. Your developer ID is read from the token's `developer_id` claim, so nothing else is needed. A
+   token that is expired or malformed is refused before any request is sent.
+
+**Filling entries (`timesheet fill`)**
+```powershell
+gitworklog timesheet fill week --hours 8 --dry-run
+gitworklog timesheet fill --from 2026-10-01 --to 2026-10-04 --hours 7.5
+gitworklog timesheet fill --from 2026-10-01 --to 2026-10-04 --hours 8 --day 2026-10-02=4
+```
+- One entry per day that has commits. The description is that day's tasks, cut at a task boundary
+  to a limit (default 500 characters, `timesheet_description_max`) and secret-masked.
+- `--hours` sets the hours for every day; `--day DATE=HOURS` overrides one day. `7.5` is sent as
+  7 hours 30 minutes. A day with no hours is skipped, never guessed.
+- A day that already has an entry is **not touched** unless you pass `--update`. With `--update`
+  the plan is marked destructive and you must type `yes`. If a day has two or more entries it is
+  skipped, because the agent cannot tell which one to change.
+- The plan shows every day with its action: create, update, skip (same), skip (exists), skip
+  (several entries) or skip (no hours), plus every request that will be sent.
+- One approval covers the whole plan. Nothing is sent before it. The run stops at the first
+  failure and reports what was already created. Afterwards the entries are read back from Nexus
+  to verify them.
+- `--dry-run` shows the plan and sends nothing.
+
+**Listing entries (`timesheet show`)**
+```powershell
+gitworklog timesheet show                                   # this week, saved project
+gitworklog timesheet show --date 2026-10-02                 # one day
+gitworklog timesheet show --week 2026-W40                   # ISO week, or any date inside it
+gitworklog timesheet show --month 2026-09 --by week         # one month, weekly subtotals
+gitworklog timesheet show last-month --all-projects --by month
+gitworklog timesheet show --from 2026-09-01 --to 2026-09-30 --project "Rider"
+```
+- Time selection: a period (`today`, `yesterday`, `week`, `last-week`, `month`, `last-month`),
+  `--from/--to`, `--date`, `--week` or `--month`. Only one kind may be used at a time. The default
+  is this week.
+- Project selection: the repository's saved project, `--project` (an ID, a full name, or a part
+  of a name that matches exactly one project), or `--all-projects`. It works outside a repository
+  that has a saved project as long as `--project` or `--all-projects` is given.
+- Output: entries per project with hours, then a total per project and, with `--all-projects`, a
+  grand total. `--by week` or `--by month` adds subtotals. The listing never writes anything.
+
+**Chat mode.** The same abilities exist as tools: `timesheet_entries` and `timesheet_preview`
+(read-only) and `timesheet_submit` (needs approval). "Show my entries for last month across all
+projects" and "fill yesterday, 8 hours" both work.
+
+**Safety rules specific to timesheets**
+- The token is never stored, printed or logged. It is masked in all output and sent only to
+  `NEXUS_API_URL`. HTTP redirects are refused, so it cannot be forwarded to another host.
+- The API address can only come from the environment, never from a repository's config file.
+- Response layouts are parsed leniently (a plain list, `data`, or a nested object) and an
+  unrecognised layout gives a clear "Unexpected response shape" error rather than silent guesses.
+
+**Not yet built.** Automatic token refresh. For now, paste a fresh access token (they last about
+15 minutes) before each run. The refresh API is to be added when its details are available.
+
 ---
 
 ## 5. Use cases
@@ -231,6 +306,10 @@ git-ignored), likely secrets in tracked files (file, line and type only), debug 
 | Engineer inheriting a repo | Hygiene audit | `health` |
 | Anyone exploring history | Follow-up questions | `chat` |
 | CI or scripts | Deterministic reports | `--no-llm worklog ... --format json`, `health` (exit code) |
+| Developer with a weekly timesheet | Enter the week's work in Nexus | `timesheet fill week --hours 8 --dry-run`, then without `--dry-run` |
+| Developer checking what is logged | "Did I fill last week?" | `timesheet show last-week --by week` |
+| Developer on several projects | Review all entries for a month | `timesheet show --month 2026-09 --all-projects --by week` |
+| Developer correcting a day | Replace a wrong entry | `timesheet fill --from 2026-10-02 --to 2026-10-02 --hours 4 --update` |
 
 ---
 
@@ -244,7 +323,7 @@ User
 CLI (Typer + Rich)  . . . . . . . . . . . . . . . . . . I/O and prompts only
   |
   +-- Services (deterministic logic; work with --no-llm)
-  |     grouping | worklog | summaries | review | commits | pr | health
+  |     grouping | worklog | summaries | review | commits | pr | health | timesheet
   |
   +-- Agent orchestrator (chat / ask)
         |   tool loop, max tool calls, history trimming
@@ -255,6 +334,7 @@ CLI (Typer + Rich)  . . . . . . . . . . . . . . . . . . I/O and prompts only
               |-- git.py            GitRunner: the ONLY code that runs `git`
               |-- filesystem.py     read, search and approved edits
               |-- repository.py     repository facts
+              |-- nexus.py          Nexus API client (the ONLY code that talks to Nexus)
               `-- registry.py       validation and dispatch
 
 Cross-cutting:  safety.py  (secret masking, sensitive paths, approval gate)
@@ -267,11 +347,13 @@ Cross-cutting:  safety.py  (secret masking, sensitive paths, approval gate)
 
 | Module | Lines | Role |
 |---|---|---|
-| `cli.py` | 601 | Commands, rich output, interactive approval prompt |
+| `cli.py` | 779 | Commands (including the `timesheet` group), rich output, interactive approval prompt |
 | `agent.py` | 110 | Tool-calling loop, tool-call limit, history compaction |
 | `llm.py` | 173 | API client, retries, tool-call parsing, JSON extraction |
 | `tools/git.py` | 797 | Allowlisted git runner, parsers, read and write operations |
-| `tools/registry.py` | 377 | 15 tool definitions, argument validation, error handling |
+| `tools/nexus.py` | 294 | Nexus client: projects, entries, create, update; token and response handling |
+| `tools/registry.py` | 519 | 18 tool definitions, argument validation, error handling |
+| `services/timesheet.py` | 619 | Fill planning, approval plan, execution and verification, entry listing and rendering |
 | `services/grouping.py` | 517 | Commit-to-task grouping and classification |
 | `services/commits.py` | 471 | Feature-wise commit planning, limits, execution |
 | `services/worklog.py` | 359 | Date ranges, collection, rendering, hours rules |
@@ -279,10 +361,10 @@ Cross-cutting:  safety.py  (secret masking, sensitive paths, approval gate)
 | `services/health.py` | 280 | Hygiene checks |
 | `services/summaries.py` | 191 | Summaries and standup |
 | `services/pr.py` | 165 | Comparison and PR description |
-| `safety.py` | 202 | Masking, approval gate |
+| `safety.py` | 205 | Masking, approval gate |
 | `models.py` | 250 | Data structures |
-| `config.py` | 135 | Settings and limits |
-| `prompts.py` | 145 | Prompt text |
+| `config.py` | 182 | Settings and limits |
+| `prompts.py` | 149 | Prompt text |
 
 ### 6.3 The agent loop
 
@@ -308,16 +390,17 @@ validated:
 | Commit messages | Must match the Conventional Commit format and length limits |
 | Commit split plan | Every file in exactly one commit; invented files ignored |
 | PR Testing section | Never written by the model |
+| Timesheet entries | Hours come only from the user; descriptions are built from commit evidence, not by the model |
 
 If the model fails or returns something invalid, the deterministic output is used instead.
 
 ---
 
-## 7. The tools (15)
+## 7. The tools (18)
 
 No shell or "run any command" tool exists. The model can call only these.
 
-**Read-only (11)**
+**Read-only (13)**
 
 | Tool | Purpose |
 |---|---|
@@ -332,8 +415,10 @@ No shell or "run any command" tool exists. The model can call only these.
 | `search_files` | Fixed-string search through tracked files |
 | `worklog_evidence` | Commits for a date range grouped into tasks |
 | `health_check` | Hygiene and secrets check |
+| `timesheet_entries` | List entries in Nexus for a project and a day, week, month, range or period |
+| `timesheet_preview` | Plan the entries for a date range and compare them with Nexus; writes nothing |
 
-**Changing tools (4, always need approval)**
+**Changing tools (5, always need approval)**
 
 | Tool | Purpose | Safeguard |
 |---|---|---|
@@ -341,6 +426,7 @@ No shell or "run any command" tool exists. The model can call only these.
 | `git_commit` | Commit staged changes | Length limits checked before approval; commit verified after |
 | `apply_edit` | Replace one exact snippet | Shows a diff; match must be unique; line endings preserved |
 | `protected_git_operation` | `push`, `restore_file`, `delete_branch`, `merge`, `rebase`, `reset_hard`, `clean` | Shows effect and exact command; user must type `yes` |
+| `timesheet_submit` | Create Nexus entries for days with commits | Hours must be given by the user; shows every request; existing entries are overwritten only with `update_existing`, which needs `yes` |
 
 ---
 
@@ -357,6 +443,10 @@ No shell or "run any command" tool exists. The model can call only these.
 | Runaway agent | Tool-call limit, per-output size caps, history budget. |
 | False claims | Evidence labels (FACT, INFERENCE, SUGGESTION), no estimated hours, tests never claimed as run. |
 | Bad commits | Verification after every commit; failure reports what was already created. |
+| Invented timesheet hours | Hours are never derived from commit times. A day without user-supplied hours is skipped. |
+| Unapproved timesheet writes | One approval of the exact plan; overwriting an entry needs `--update` and typing `yes`; the run stops at the first failure and is verified afterwards. |
+| Nexus token theft | The token comes from the environment or a hidden prompt, is never stored or logged, is masked in output, goes only to `NEXUS_API_URL`, and redirects are refused. Expired tokens are rejected locally. |
+| Redirected Nexus address | `NEXUS_API_URL` is read only from the environment (HTTPS, or HTTP for localhost), never from repository config. |
 
 ---
 
@@ -375,6 +465,7 @@ No shell or "run any command" tool exists. The model can call only these.
 | Tests | pytest | 9.1.1 | Fixtures, parametrisation |
 | Lint and format | Ruff | 0.16.9 | Fast; one tool for both |
 | Packaging | setuptools via `pyproject.toml` | n/a | Installable, `gitworklog` entry point |
+| Nexus HTTP client | Python standard library `urllib` | n/a | No new dependency; redirects disabled so tokens cannot leak |
 
 Only four runtime dependencies. No LangChain, LangGraph, CrewAI or AutoGen.
 
@@ -406,8 +497,18 @@ How the project works with this model:
 
 ## 11. Configuration
 
-Credentials only through environment variables (`NVIDIA_API_KEY`), loaded from the real
-environment, `~/.gitworklog/.env` or the tool's own `.env`. Never from the analysed repository.
+Credentials only through environment variables (`NVIDIA_API_KEY`, `NEXUS_ACCESS_TOKEN`), loaded from
+the real environment, `~/.gitworklog/.env` or the tool's own `.env`. Never from the analysed
+repository.
+
+| Environment variable | Meaning |
+|---|---|
+| `NVIDIA_API_KEY` | Model API key |
+| `GITWORKLOG_MODEL`, `GITWORKLOG_BASE_URL` | Model and endpoint overrides |
+| `NEXUS_API_URL` | Nexus API base address (HTTPS; HTTP only for localhost) |
+| `NEXUS_TOKEN` | Nexus access token, normally set in `.env` (checked first) |
+| `NEXUS_ACCESS_TOKEN` | Same, as a plain environment variable (otherwise a hidden prompt) |
+| `NEXUS_DEVELOPER_ID` | Developer ID, only if the token has no `developer_id` claim |
 
 Optional per-repo `.gitworklog/config.json` (secrets are rejected):
 
@@ -420,6 +521,8 @@ Optional per-repo `.gitworklog/config.json` (secrets are rejected):
 | `commit_target_words` | 15 | 3 to 300 | Length the model aims for |
 | `commit_body_max_lines` | 6 | 0 to 50 | `0` means subject only |
 | `commit_body_line_max` | 100 | 40 to 500 | Body line length |
+| `timesheet_project_id` | none | n/a | Nexus project for this repository (set by `timesheet init`) |
+| `timesheet_description_max` | 500 | n/a | Longest timesheet description sent |
 | `max_tool_calls` | 20 | 1 to 100 | Agent loop limit |
 | `model`, `temperature` | | | Model overrides |
 
@@ -427,8 +530,13 @@ Optional per-repo `.gitworklog/config.json` (secrets are rejected):
 
 ## 12. Quality and testing
 
-- **219 tests**, plus 3 live tests against the real model (opt-in with `GITWORKLOG_LIVE_TESTS=1`).
+- **288 tests pass**, plus 3 live tests against the real model (opt-in with
+  `GITWORKLOG_LIVE_TESTS=1`).
 - Tests build temporary Git repositories with fixed dates and timezones and use a scripted fake LLM.
+- Timesheet tests run against `tests/fake_nexus.py`, a small server that speaks real HTTP on
+  localhost. They cover create, update and skip decisions, the hours rules, token handling,
+  refused redirects, failure mid-run, several response layouts, every listing range (day, ISO
+  week, month, leap year, custom range), weekly and monthly subtotals, and the agent tools.
 - Coverage areas: Git wrappers and parsing, date filtering, task grouping, every worklog format
   and the hours rules, secret masking, approval and rejection, destructive-operation protection,
   tool validation, the agent loop (limits, history, errors), commit splitting and message limits,
@@ -454,14 +562,21 @@ not supported by the diff; camelCase commit scopes being rejected; and false sec
 - Review and wording quality depend on a 20B model; very large diffs are reviewed partially and say so.
 - Model latency varies (about 2 to 50 seconds per call).
 - Area detection (Backend, Frontend and so on) uses file paths and extensions.
-- No integration with hosted services; PR descriptions are printed, not posted.
+- PR descriptions are printed, not posted to a hosting service.
+- **The Nexus integration has not been run against the real service.** It is tested only against a
+  local fake built from the sample requests. The real response layouts of the projects and entries
+  APIs are unconfirmed, so parsing accepts several shapes.
+- No automatic token refresh yet. Access tokens last about 15 minutes and must be supplied again.
+- The 500-character description limit is a safe guess; Nexus's real limit is unknown.
+- A day with two or more existing entries is skipped, not edited.
 - Not pushed to a remote; no CI configured yet.
 
 ---
 
 ## 14. Future improvements
 
-GitHub and GitLab integration and PR creation; Jira, Linear, calendar and Slack integration; real
+Automatic Nexus token refresh (Microsoft sign-in with refresh tokens); confirming the real Nexus
+response layouts; GitHub and GitLab integration and PR creation; Jira, Linear, calendar and Slack integration; real
 development-session tracking for actual hours; persistent project memory; specialised review
 agents and parallel subagents; MCP integrations; automatic daily worklog generation; IDE
 integration; splitting a single file's hunks into separate commits; support for other commit styles.
@@ -477,6 +592,9 @@ cd D:\your\git\project
 gitworklog                                     # chat mode
 gitworklog worklog week                        # timesheet
 gitworklog commit                              # feature-wise commits
+gitworklog timesheet init                      # once: pick the Nexus project
+gitworklog timesheet fill week --hours 8 --dry-run
+gitworklog timesheet show last-month --by week
 ```
 
 Run from anywhere by adding a launcher on PATH (see the README), and set `NVIDIA_API_KEY` in

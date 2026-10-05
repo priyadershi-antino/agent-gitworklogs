@@ -38,6 +38,7 @@ from gitworklog.tools.nexus import (
     clean_token,
     developer_id_for,
     jwt_claims,
+    refresh_access_token,
     resolve_access_token,
 )
 from gitworklog.tools.registry import ToolContext, build_registry
@@ -109,15 +110,35 @@ def test_clean_token_accepts_bearer_prefix_and_rejects_junk():
 
 
 def test_resolve_access_token(monkeypatch):
-    monkeypatch.delenv("NEXUS_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("NEXUS_ACCESS_TOKEN", "")
+    monkeypatch.setenv("NEXUS_TOKEN", "")
     with pytest.raises(NexusAuthError, match="NEXUS_ACCESS_TOKEN"):
         resolve_access_token(prompt=False)
     monkeypatch.setenv("NEXUS_ACCESS_TOKEN", make_token(exp_in=-1))
+    monkeypatch.setenv("NEXUS_TOKEN", "")
     with pytest.raises(NexusAuthError, match="expired"):
         resolve_access_token(prompt=False)
     token = make_token()
     monkeypatch.setenv("NEXUS_ACCESS_TOKEN", f"Bearer {token}")
+    monkeypatch.setenv("NEXUS_TOKEN", "")
     assert resolve_access_token(prompt=False) == token
+
+
+def test_refresh_access_token(monkeypatch):
+    old_token = make_token(exp_in=-1)
+    refresh_token = "refresh-token-for-tests"
+    server = FakeNexus(old_token, refresh_token=refresh_token)
+    server.start()
+    try:
+        monkeypatch.delenv("NEXUS_TOKEN", raising=False)
+        monkeypatch.setenv("NEXUS_ACCESS_TOKEN", old_token)
+        monkeypatch.setenv("NEXUS_REFRESH_TOKEN", refresh_token)
+        monkeypatch.setenv("NEXUS_API_URL", server.base_url)
+        refreshed = refresh_access_token(server.base_url)
+        assert refreshed != old_token
+        assert jwt_claims(refreshed)["developer_id"] == DEV_ID
+    finally:
+        server.stop()
 
 
 # ------------------------------------------------------------------------------ client

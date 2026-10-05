@@ -35,8 +35,10 @@ class FakeNexus:
         fail_post_for: str | None = None,
         redirect_to: str | None = None,
         error_body: str = "database exploded",
+        refresh_token: str | None = None,
     ):
         self.token = token
+        self.refresh_token = refresh_token or "refresh-token-for-tests"
         self.shape = shape  # list | data | nested | weird
         self.fail_post_for = fail_post_for  # entry_date that makes POST return HTTP 500
         self.redirect_to = redirect_to
@@ -126,6 +128,14 @@ class FakeNexus:
                 route(self, method, parsed.path, query, body)
 
         def route(h: Handler, method: str, path: str, query: dict, body: Any) -> None:
+            if method == "POST" and path.endswith("/auth/refresh-token"):
+                raw = body or {}
+                if not isinstance(raw, dict):
+                    return h._send(400, {"message": "bad body"})
+                if raw.get("refreshToken") != outer.refresh_token:
+                    return h._send(401, {"message": "invalid refresh token"})
+                outer.token = make_token(developer_id=DEV_ID)
+                return h._send(200, {"accessToken": outer.token, "refreshToken": outer.refresh_token})
             if method == "GET" and path.endswith("/timesheet/projects"):
                 return h._send(200, outer._wrap(outer.projects, "projects"))
             if method == "GET" and path.endswith("/timesheet/entries"):
